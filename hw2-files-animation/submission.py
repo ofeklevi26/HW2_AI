@@ -88,11 +88,11 @@ def smart_heuristic(env: WarehouseEnv, robot_id: int):
         charge_penalty = 0
 
     # EnergyRisk(s, r)
-    energy_risk = battery_shortage + 0.5 * charge_penalty
+    energy_risk = battery_shortage + 1.5 * charge_penalty
 
     # Final heuristic:
-    # h(s,r) = 0.5*ScoreDiff + 3*PackageUtility - 4*EnergyRisk
-    return (0.5 * score_diff + 3 * package_utility - 4 * energy_risk
+    # h(s,r) = 2*ScoreDiff + 3*PackageUtility - 4*EnergyRisk
+    return (2*score_diff + 3* package_utility - 4 * energy_risk
     )
 
 
