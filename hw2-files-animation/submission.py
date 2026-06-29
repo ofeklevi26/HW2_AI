@@ -26,6 +26,12 @@ def ordered_operators(operators):
             ordered.append(op)
 
     return ordered
+
+def expectimax_action_weight(op):
+    if op in EXPECTIMAX_ACTION_WEIGHTS:
+        return EXPECTIMAX_ACTION_WEIGHTS[op]
+    return 1
+
 # TODO: section a : 3
 def smart_heuristic(env: WarehouseEnv, robot_id: int):
     robot = env.get_robot(robot_id)
@@ -302,7 +308,92 @@ def expectimax_decision(env: WarehouseEnv, robot_id: int, depth: int, heuristic_
     If heuristic_fn is None, use smart_heuristic.
     Ties must be broken according to TIE_BREAKING_ORDER.
     """
-    raise NotImplementedError()
+    if heuristic_fn is None:
+        heuristic_fn = smart_heuristic
+
+    def expectimax_value(state, current_robot_id, remaining_depth):
+        # RB-Expectimax base case:
+        # terminal state OR depth limit reached => evaluate with h.
+        if state.done() or remaining_depth <= 0:
+            return heuristic_fn(state, robot_id)
+
+        operators = ordered_operators(state.get_legal_operators(current_robot_id))
+
+        if len(operators) == 0:
+            return heuristic_fn(state, robot_id)
+
+        next_robot_id = (current_robot_id + 1) % 2
+
+        # MAX node: our robot chooses the best action.
+        if current_robot_id == robot_id:
+            best_value = float("-inf")
+
+            for op in operators:
+                child = state.clone()
+                child.apply_operator(current_robot_id, op)
+
+                value = expectimax_value(
+                    child,
+                    next_robot_id,
+                    remaining_depth - 1
+                )
+
+                best_value = max(best_value, value)
+
+            return best_value
+
+        # Chance node: opponent follows the given probabilistic policy.
+        else:
+            total_weight = 0
+            for op in operators:
+                total_weight += expectimax_action_weight(op)
+
+            expected_value = 0
+
+            for op in operators:
+                child = state.clone()
+                child.apply_operator(current_robot_id, op)
+
+                value = expectimax_value(
+                    child,
+                    next_robot_id,
+                    remaining_depth - 1
+                )
+
+                probability = expectimax_action_weight(op) / total_weight
+                expected_value += probability * value
+
+            return expected_value
+
+    operators = ordered_operators(env.get_legal_operators(robot_id))
+
+    if len(operators) == 0:
+        return None
+
+    # If depth is 0 or env is already done, no child search is possible.
+    # All actions are equivalent, so return the first by tie-breaking order.
+    if depth <= 0 or env.done():
+        return operators[0]
+
+    best_operator = operators[0]
+    best_value = float("-inf")
+
+    for op in operators:
+        child = env.clone()
+        child.apply_operator(robot_id, op)
+
+        value = expectimax_value(
+            child,
+            (robot_id + 1) % 2,
+            depth - 1
+        )
+
+        # Use >, not >=, so ties keep the first action according to TIE_BREAKING_ORDER.
+        if value > best_value:
+            best_value = value
+            best_operator = op
+
+    return best_operator
 
 
 class AgentGreedyImproved(AgentGreedy):
@@ -535,7 +626,110 @@ class AgentAlphaBeta(Agent):
 class AgentExpectimax(Agent):
     # TODO: section d : 3
     def run_step(self, env: WarehouseEnv, agent_id, time_limit):
-        raise NotImplementedError()
+        deadline = time.time() + 0.95 * time_limit
+
+        legal_ops = ordered_operators(env.get_legal_operators(agent_id))
+
+        if len(legal_ops) == 0:
+            return None
+
+        best_action = legal_ops[0]
+        depth = 1
+
+        def timed_expectimax_value(state, current_robot_id, remaining_depth):
+            if time.time() >= deadline:
+                raise TimeoutError()
+
+            # RB-Expectimax base case:
+            # terminal state OR depth limit reached => evaluate with smart_heuristic.
+            if state.done() or remaining_depth <= 0:
+                return smart_heuristic(state, agent_id)
+
+            operators = ordered_operators(state.get_legal_operators(current_robot_id))
+
+            if len(operators) == 0:
+                return smart_heuristic(state, agent_id)
+
+            next_robot_id = (current_robot_id + 1) % 2
+
+            # MAX node: our robot
+            if current_robot_id == agent_id:
+                best_value = float("-inf")
+
+                for op in operators:
+                    if time.time() >= deadline:
+                        raise TimeoutError()
+
+                    child = state.clone()
+                    child.apply_operator(current_robot_id, op)
+
+                    value = timed_expectimax_value(
+                        child,
+                        next_robot_id,
+                        remaining_depth - 1
+                    )
+
+                    best_value = max(best_value, value)
+
+                return best_value
+
+            # Chance node: opponent follows weighted probabilistic policy.
+            else:
+                total_weight = 0
+                for op in operators:
+                    total_weight += expectimax_action_weight(op)
+
+                expected_value = 0
+
+                for op in operators:
+                    if time.time() >= deadline:
+                        raise TimeoutError()
+
+                    child = state.clone()
+                    child.apply_operator(current_robot_id, op)
+
+                    value = timed_expectimax_value(
+                        child,
+                        next_robot_id,
+                        remaining_depth - 1
+                    )
+
+                    probability = expectimax_action_weight(op) / total_weight
+                    expected_value += probability * value
+
+                return expected_value
+
+        # Time-limited expectimax using iterative deepening.
+        # Keep the best action from the last fully completed depth.
+        while True:
+            try:
+                current_best_action = legal_ops[0]
+                current_best_value = float("-inf")
+
+                for op in legal_ops:
+                    if time.time() >= deadline:
+                        raise TimeoutError()
+
+                    child = env.clone()
+                    child.apply_operator(agent_id, op)
+
+                    value = timed_expectimax_value(
+                        child,
+                        (agent_id + 1) % 2,
+                        depth - 1
+                    )
+
+                    # Tie-breaking: keep first action in TIE_BREAKING_ORDER.
+                    if value > current_best_value:
+                        current_best_value = value
+                        current_best_action = op
+
+                # Only update after a full depth finished.
+                best_action = current_best_action
+                depth += 1
+
+            except TimeoutError:
+                return best_action
 
 
 # here you can check specific paths to get to know the environment
